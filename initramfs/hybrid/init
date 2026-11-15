@@ -1,0 +1,164 @@
+#!/bin/busybox sh
+# ============================================================
+# XJ19 / MSM8909  混合启动 init  (v13, 用于写入 boot 分区)
+#
+# v13 变更：在 enable=1 之前固定 RNDIS MAC（02:1a:7d:da:71:19）
+#
+# 【v11 的核心设计原则】
+#   在"决定去 Android"之前，绝不 mount /dev、/proc、/sys。
+#   理由（v10 实测失败的教训）：v10 把这三个挂上又 umount 掉，
+#   然后 exec /init.real，Android init 起不来，PID 1 退出 -> 内核 panic ->
+#   设备冻死在 QHSUSB__BULK，只能物理拔插。
+#   而 harness2 探针（已验证能 6 秒回 Android）从不碰这三个挂载点，
+#   它把 proc/sysfs 挂到 /hp /hs 侧路目录，/dev 用 cpio 里的静态节点。
+#   所以 v11 的"回 Android"路径与 harness2 完全一致：
+#       什么都不拆，直接 exec /init.real
+#
+#   只有在 RNDIS 成功、确定要进 Alpine 之后，才去动 /dev /proc /sys。
+#
+# 启动决策：
+#   /cache 上存在 .boot-android            -> 进 Android
+#   /cache/alpine 缺失或损坏               -> 进 Android
+#   /cache/boot.count >= 3（连续失败）      -> 进 Android
+#   否则                                   -> 配 RNDIS + switch_root 进 Alpine
+#
+# 本内核：CONFIG_USB_G_ANDROID=y / 无 DEVTMPFS / 无 WATCHDOG
+# ============================================================
+
+BB=/bin/busybox
+export PATH=/bin
+LOG=/boot.log
+NEWROOT=/newroot
+CACHE=/nd/cache
+G=/hs/class/android_usb/android0
+FLAG=/mnt/.boot-android
+
+# ---- 日志：一开始就拿住 splash 的句柄 ----
+# 之后即使 /dev 被 tmpfs 覆盖，fd 9 仍指向同一块设备，日志不丢。
+exec 9>/dev/splash 2>/dev/null || exec 9>/dev/null
+log() { echo "[hyb] $*" >> "$LOG" 2>/dev/null; echo "[hyb] $*" >&9 2>/dev/null; }
+
+# ---- 回 Android：与 harness2 相同的路径，不做任何清理 ----
+# /dev /proc /sys 此时是内核与 ramdisk 留下的原始状态，原厂 init 会自己接管。
+to_android() {
+    log "==> 回 Android: $*"
+    $BB sync 2>/dev/null
+    cd /
+    log "==> exec /init.real"
+    exec /init.real
+}
+
+nets() { $BB ls /hs/class/net 2>/dev/null | $BB tr '\n' ' '; }
+
+w() {  # w <path> <value> <tag>
+    $BB printf '%s' "$2" > "$1" 2>/tmp/werr
+    _rc=$?
+    log "  W($3)=[$2] rc=$_rc $($BB cat /tmp/werr 2>/dev/null)"
+    return $_rc
+}
+
+log "======= hybrid v11 init  pid=$$ ======="
+
+# ---------- 0. 只建立侧路挂载，不碰 /dev /proc /sys ----------
+$BB mkdir -p /mnt /nd /hp /hs "$NEWROOT" /tmp 2>/dev/null
+$BB mknod "$CACHE" b 179 23 2>/dev/null
+$BB mknod /dev/splash b 179 16 2>/dev/null
+$BB mount -t proc  proc  /hp 2>>"$LOG"
+$BB mount -t sysfs sysfs /hs 2>>"$LOG"
+log "H0 kernel=$($BB cat /hp/version 2>/dev/null)"
+[ -d /hs/class ] || to_android "sysfs 侧路挂载失败"
+
+# ---------- 1. cache 分区 ----------
+if ! $BB mount -t ext4 -o rw "$CACHE" /mnt 2>>"$LOG"; then
+    to_android "cache 挂载失败"
+fi
+log "H1 cache OK 条目=$($BB ls /mnt | $BB wc -l)"
+
+if [ -e "$FLAG" ]; then
+    to_android "存在 .boot-android 标志"
+fi
+if [ -e /mnt/alpine/.boot-android ]; then
+    to_android "alpine 根上有 .boot-android 标志"
+fi
+if [ ! -x /mnt/alpine/bin/busybox ] || [ ! -e /mnt/alpine/sbin/init ]; then
+    to_android "rootfs 缺失: $($BB ls /mnt | $BB tr '\n' ' ')"
+fi
+log "H2 rootfs OK ver=$($BB cat /mnt/alpine/etc/alpine-release 2>/dev/null)"
+
+# ---------- 2. 连续失败计数（无按键机器唯一的自救手段）----------
+CNT=0
+[ -f /mnt/boot.count ] && CNT=$($BB cat /mnt/boot.count 2>/dev/null)
+case "$CNT" in ''|*[!0-9]*) CNT=0 ;; esac
+[ "$CNT" -ge 3 ] && to_android "连续 $CNT 次未进入 Alpine"
+CNT=$((CNT + 1))
+echo "$CNT" > /mnt/boot.count 2>/dev/null
+$BB sync 2>/dev/null
+log "H3 启动计数=$CNT"
+
+# ---------- 3. RNDIS（原厂 4 条配方）----------
+n=0
+while [ $n -lt 25 ] && [ ! -e "$G/enable" ]; do
+    $BB sleep 1
+    n=$((n + 1))
+done
+[ -e "$G/enable" ] || to_android "android_usb 未就绪(${n}s)"
+log "H4 gadget 就绪(${n}s) funcs=[$($BB cat $G/functions 2>/dev/null)]"
+NET0="$(nets)"
+log "H4 基线网卡=[$NET0]"
+
+w "$G/enable" 0 enable0 || to_android "enable=0 失败"
+$BB sleep 1
+# v13：固定 RNDIS 网卡 MAC。不设的话内核每次启动随机生成，Windows 会按 MAC
+# 给每个新值单独建一个"以太网 N"适配器，越用越多，IP 配置和防火墙规则也各建一份。
+# 必须在 enable=1 之前写：使能后再改会触发一次重新枚举。
+w "$G/f_rndis/ethaddr" 02:1a:7d:da:71:19 ethaddr \
+    || log "W ethaddr 写入失败（不影响启动，MAC 仍为随机）"
+w "$G/f_rndis/wceis" 1 wceis
+w "$G/idVendor"  05C6  idVendor
+w "$G/idProduct" F00E  idProduct
+w "$G/functions" rndis functions || to_android "functions=rndis 失败"
+w "$G/enable" 1 enable1 || to_android "enable=1 失败"
+log "H5 state=[$($BB cat $G/state 2>/dev/null)]"
+
+i=0; NEW=""
+while [ $i -lt 25 ]; do
+    for it in $(nets); do
+        case " $NET0 " in *" $it "*) ;; *) NEW="$it" ;; esac
+    done
+    [ -n "$NEW" ] && break
+    $BB sleep 1
+    i=$((i + 1))
+done
+[ -n "$NEW" ] || to_android "25s 无新增网卡 [$(nets)]"
+log "H6 新网卡=[$NEW] (${i}s)"
+
+# ============================================================
+# 以下才动 /dev /proc /sys —— 已经确定要进 Alpine。
+# 万一 switch_root 失败，/dev 退回 cpio 静态节点即可回 Android。
+# ============================================================
+$BB cp "$LOG" /mnt/boot-initramfs.log 2>/dev/null
+echo "$NEW" > /mnt/usbnet.name 2>/dev/null
+
+$BB mkdir -p /mnt/alpine/cache 2>/dev/null
+$BB mount --bind /mnt /mnt/alpine/cache 2>>"$LOG"   # Alpine 里 /cache 指向 cache 分区根
+$BB mount --bind /mnt/alpine "$NEWROOT" 2>>"$LOG" || to_android "bind rootfs 失败"
+log "H7 bind OK"
+
+$BB mkdir -p "$NEWROOT/dev" "$NEWROOT/proc" "$NEWROOT/sys"
+$BB mount -t sysfs sysfs /sys 2>>"$LOG"
+$BB mount -t tmpfs -o mode=755 tmpfs /dev 2>>"$LOG"
+$BB mdev -s 2>>"$LOG"
+$BB mkdir -p /dev/pts 2>/dev/null
+$BB mount -t devpts devpts /dev/pts 2>>"$LOG"
+$BB mount -t proc proc /proc 2>>"$LOG"
+log "H7b /dev=$($BB ls /dev | $BB wc -l) 节点"
+
+$BB mount --move /dev  "$NEWROOT/dev"  2>>"$LOG"
+$BB mount --move /proc "$NEWROOT/proc" 2>>"$LOG"
+$BB mount --move /sys  "$NEWROOT/sys"  2>>"$LOG"
+log "H8 switch_root -> Alpine"
+exec $BB switch_root "$NEWROOT" /sbin/init
+
+# 只有 switch_root 失败才会到这里：/dev 还是 tmpfs，退回去再交还 Android
+$BB umount /dev 2>/dev/null
+to_android "switch_root 返回（不应发生）"

@@ -1,0 +1,12 @@
+# /etc/inittab  —— 原生启动版 v7（RNDIS + SSH）
+# 本机无屏、无键盘、无按键；唯一通道是 USB RNDIS 网卡 (usb0) 上的 SSH
+
+::sysinit:/bin/sh /boot-native.sh
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+# 无 VT，也没有可用的 ttyGS（rndis 模式下 acm 未启用），不挂 getty
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown

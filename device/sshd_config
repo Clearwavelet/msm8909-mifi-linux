@@ -1,0 +1,14 @@
+Port 22
+AddressFamily inet
+ListenAddress 192.168.42.129
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+PermitRootLogin yes
+PubkeyAuthentication yes
+# 密码登录：按用户要求开启（root 密码见 README，弱口令，仅限 USB 点对点链路）
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+AuthorizedKeysFile .ssh/authorized_keys
+PrintMotd no
+Subsystem sftp /usr/lib/ssh/sftp-server

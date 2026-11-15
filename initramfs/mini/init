@@ -1,0 +1,46 @@
+#!/bin/busybox sh
+# ============================================================
+# mini 诊断 init —— 只做一件事：证明"我们的 /init 能执行、能写日志、
+# 能看见 .boot-android 标志、能把控制权交还原厂 init"。
+# 不做任何挂载到 /dev /proc /sys 的动作，最小副作用。
+# ============================================================
+BB=/bin/busybox
+L=/mini.log
+: > $L 2>/dev/null
+
+# 选一个可写的 splash 目标（两个都试，记录用了哪个）
+SPL=""
+for c in /dev/splash /dev/block/mmcblk0p16 /tmp/none; do
+    if [ -e "$c" ] && [ "$c" != "/tmp/none" ]; then SPL="$c"; break; fi
+done
+
+p() {
+    echo "[mini] $*" >> $L 2>/dev/null
+    if [ -n "$SPL" ]; then
+        $BB dd if=$L of=$SPL bs=4096 conv=notrunc 2>/dev/null
+    fi
+}
+
+p "======= mini start  pid=$$  argv0=$0 ======="
+p "kernel=$($BB uname -r)"
+p "splash_target=[$SPL]"
+p "dev_splash=[$($BB ls -l /dev/splash 2>/dev/null)]"
+p "root_list=[$($BB ls / | $BB tr '\n' ' ')]"
+
+$BB mkdir -p /mnt /tmp 2>/dev/null
+p "mkdir rc=$?"
+$BB mknod /tmp/c b 179 23 2>/dev/null
+p "mknod_cachedev rc=$?"
+$BB mount -t ext4 -o rw /tmp/c /mnt 2>/dev/null
+p "mount_cache rc=$? entries=[$($BB ls -a /mnt 2>/dev/null | $BB tr '\n' ' ')]"
+
+if [ -e /mnt/.boot-android ]; then
+    p "FLAG=YES"
+else
+    p "FLAG=NO"
+fi
+
+p "--- exec /init.real ---"
+$BB sync 2>/dev/null
+exec /init.real
+p "!! exec /init.real 失败"

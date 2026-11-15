@@ -1,0 +1,12 @@
+# 统一换行：脚本必须 LF，否则 Windows 上 clone 下来直接跑不了
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.py            text eol=lf
+initramfs/*/init text eol=lf
+device/*        text eol=lf
+
+# 二进制
+*.img           binary
+*.gz            binary
+vendor/busybox-static binary

@@ -1,0 +1,40 @@
+# ---- 私钥，永不入库 ----
+id_alpine
+id_alpine_rsa
+*_ed25519
+*_rsa
+*.pem
+*.ppk
+authorized_keys
+
+# ---- 构建产物与备份 ----
+build/
+backup/
+*.tar.gz
+*.img.gz
+*.cpio
+*.cpio.gz
+
+# ---- 本机工具与转储（体积大、与个人环境绑定）----
+pt31/
+pt31.zip
+platform-tools/
+pt.zip
+usb_driver/
+usb_driver.zip
+dts/
+*.apk
+*.zip
+crops/
+
+# ---- 会话/临时 ----
+.workbuddy/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# ---- 例外：编译好的镜像要入库 ----
+!images/boot-hybrid-v13.img
+!vendor/stock-ramdisk.gz
+!vendor/busybox-static

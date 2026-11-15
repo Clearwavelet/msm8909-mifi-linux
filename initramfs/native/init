@@ -1,0 +1,192 @@
+#!/bin/busybox sh
+# ============================================================
+# XJ19 / MSM8909  原生 Alpine 启动  init  v9
+#
+# v9 相对 v8 的修正：
+#
+#  1) v8 实测：bail 触发了，但 `reboot -f` 在无电池板子上是**断电**而不是
+#     重启（PS_HOLD 掉电后 PMIC 不自恢复），设备直接从 USB 消失。
+#     所以"失败自动回 Android"在这块板子上不可能实现，每次失败都要拔插。
+#     对策：v9 换成最底层的 `sysrq-b`（绕过 reboot notifier 链）先试，
+#     再退回 reboot -f；并保证 splash 日志在此之前落盘。
+#
+#  2) v8 只在 /sys/class/net/usb0 存在时才继续，硬编码了网卡名。
+#     f_rndis 在不同 QCOM 树上可能产出 rndis0/usb0 等不同名字。
+#     v9 改为「与启用前的网卡列表做差集，任一新网卡即可」，
+#     并把每一步的完整网卡列表写进 splash。
+#
+#  3) 新增 UDC 状态与 dmesg 落盘，便于精确定位 enable=1 是否真正 bind 成功。
+#
+#  4) 新增 ACM 兜底通道：RNDIS 拿不到网卡时，按原厂配方
+#     `f_acm/acm_transports smd,tty` + `functions acm` 再试一次，
+#     若能拿到 /dev/ttyGS0 就交给交互 shell（Windows 侧会出 COM 口）。
+#
+# 本内核：CONFIG_USB_G_ANDROID=y / USB_F_ACM=y / 无 DEVTMPFS / 无 WATCHDOG
+# ============================================================
+
+BB=/bin/busybox
+export PATH=/bin
+LOG=/boot.log
+CACHE_DEV=/dev/mmcblk0p23
+NEWROOT=/newroot
+G=/sys/class/android_usb/android0
+
+: > "$LOG"
+log() { echo "[init] $*" >> "$LOG"; }
+
+splash() {
+    if [ -b /dev/splash ]; then
+        $BB dd if="$LOG" of=/dev/splash bs=4096 conv=notrunc 2>/dev/null
+        $BB sync 2>/dev/null
+    fi
+}
+logx() { log "$*"; splash; }
+
+nets() { $BB ls /sys/class/net 2>/dev/null | $BB tr '\n' ' '; }
+
+# 兜底复位：sysrq-b 绕过 reboot notifier 链，比 reboot(2) 更底层
+hardreset() {
+    log "!!!!! 尝试复位"
+    $BB sync
+    splash
+    if [ -w /proc/sysrq-trigger ]; then
+        log "!!!!! 1) sysrq-b"
+        splash
+        echo b > /proc/sysrq-trigger 2>>"$LOG"
+    else
+        log "!!!!! /proc/sysrq-trigger 不可写"
+    fi
+    $BB sleep 4
+    log "!!!!! 2) reboot -f（无电池板子上可能是断电）"
+    splash
+    $BB reboot -f
+    $BB sleep 120
+}
+
+bail() {
+    log "!!!!! BAIL: $*"
+    log "!!!!! net=[$(nets)]"
+    log "!!!!! udc=[$($BB ls /sys/class/udc 2>/dev/null | $BB tr '\n' ' ')]"
+    log "!!!!! gadget.state=[$($BB cat $G/state 2>/dev/null)] funcs=[$($BB cat $G/functions 2>/dev/null)] enable=[$($BB cat $G/enable 2>/dev/null)]"
+    splash
+    hardreset
+}
+
+w() {
+    printf '%s' "$2" > "$1" 2>/tmp/werr
+    _rc=$?
+    _e=$($BB cat /tmp/werr 2>/dev/null)
+    log "  W($3)=[$2] rc=$_rc $_e"
+    return $_rc
+}
+
+# ---------- 0. 文件系统视图 ----------
+$BB mkdir -p /proc /sys /dev /dev/pts /mnt "$NEWROOT" /tmp
+$BB mount -t proc  proc  /proc      2>>"$LOG"
+$BB mount -t sysfs sysfs /sys       2>>"$LOG"
+$BB mount -t tmpfs -o mode=755 tmpfs /dev 2>>"$LOG"
+$BB mkdir -p /dev/pts
+$BB mount -t devpts devpts /dev/pts 2>>"$LOG"
+
+$BB mknod /dev/null    c 1 3    2>/dev/null
+$BB mknod /dev/zero    c 1 5    2>/dev/null
+$BB mknod /dev/kmsg    c 1 11   2>/dev/null
+$BB mknod /dev/console c 5 1    2>/dev/null
+$BB mknod /dev/splash  b 179 16 2>/dev/null
+$BB mknod "$CACHE_DEV" b 179 23 2>/dev/null
+
+logx "S0 init v9 执行  pid=$$  kernel=$($BB uname -r)"
+$BB mdev -s 2>>"$LOG"
+logx "S1 mdev 完成 /dev=$($BB ls /dev 2>/dev/null | $BB wc -l) applet_cat=[$($BB cat /proc/sys/kernel/hostname 2>/dev/null)]"
+
+# ---------- 1. 等 android_usb 就绪 ----------
+n=0
+while [ $n -lt 40 ]; do
+    [ -e "$G/enable" ] && break
+    $BB sleep 1
+    n=$((n + 1))
+done
+[ -e "$G/enable" ] || bail "40s 内 $G/enable 未出现（ls=$($BB ls /sys/class/android_usb 2>/dev/null | $BB tr '\n' ' ')）"
+
+logx "S2 gadget 就绪(${n}s) attrs=$($BB ls $G 2>/dev/null | $BB wc -l) udc=[$($BB ls /sys/class/udc 2>/dev/null | $BB tr '\n' ' ')]"
+log "S2 初始 enable=[$($BB cat $G/enable 2>/dev/null)] funcs=[$($BB cat $G/functions 2>/dev/null)] state=[$($BB cat $G/state 2>/dev/null)] idV=[$($BB cat $G/idVendor 2>/dev/null)] idP=[$($BB cat $G/idProduct 2>/dev/null)]"
+NET0="$(nets)"
+logx "S2 基线网卡=[$NET0]"
+
+# ---------- 2. RNDIS ----------
+log "S3 配置 RNDIS"
+w "$G/enable" 0 enable0 || bail "enable=0 失败"
+$BB sleep 1
+w "$G/f_rndis/wceis" 1 wceis
+w "$G/idVendor"  05C6  idVendor
+w "$G/idProduct" F00E  idProduct
+w "$G/functions" rndis functions || bail "functions=rndis 写入失败"
+log "S3 回读 funcs=[$($BB cat $G/functions 2>/dev/null)]"
+w "$G/enable" 1 enable1 || bail "enable=1 失败"
+logx "S4 enable=1 state=[$($BB cat $G/state 2>/dev/null)]"
+
+# 等任一新增网卡（不再硬编码 usb0）
+i=0
+NEW=""
+while [ $i -lt 25 ]; do
+    for it in $(nets); do
+        case " $NET0 " in *" $it "*) ;; *) NEW="$it";; esac
+    done
+    [ -n "$NEW" ] && break
+    $BB sleep 1
+    i=$((i + 1))
+done
+if [ -z "$NEW" ]; then
+    log "S5 !! 25s 无新增网卡  net=[$(nets)] state=[$($BB cat $G/state 2>/dev/null)] funcs=[$($BB cat $G/functions 2>/dev/null)]"
+    log "S5 dmesg tail:"
+    $BB dmesg 2>/dev/null | $BB tail -25 >> "$LOG"
+    splash
+    # ACM 兜底（原厂配方：必须先设 acm_transports）
+    log "S5b 尝试 ACM 兜底"
+    w "$G/enable" 0 en0b
+    $BB sleep 1
+    w "$G/f_acm/acm_transports" "smd,tty" acm_tr
+    w "$G/functions" acm acm_funcs
+    log "S5b 回读 funcs=[$($BB cat $G/functions 2>/dev/null)]"
+    w "$G/enable" 1 en1b
+    $BB sleep 6
+    $BB mdev -s 2>>"$LOG"
+    log "S5b state=[$($BB cat $G/state 2>/dev/null)] ttyGS=[$($BB ls /sys/class/tty 2>/dev/null | $BB grep -i ttygs | $BB tr '\n' ' ')] devttyGS=[$($BB ls -l /dev/ttyGS0 2>/dev/null)]"
+    splash
+    if [ -c /dev/ttyGS0 ]; then
+        log "S5c ACM 可用，交给串口 shell"
+        splash
+        $BB sleep 3
+        exec 0<>/dev/ttyGS0 1<>/dev/ttyGS0 2>&1
+        echo ""; echo "###### XJ19 rescue shell (ACM) ######"
+        exec $BB sh -i
+    fi
+    bail "RNDIS 与 ACM 都没拿到通道"
+fi
+logx "S5 新网卡=[$NEW] (${i}s) net=[$(nets)] state=[$($BB cat $G/state 2>/dev/null)]"
+
+# ---------- 3. 挂 cache ----------
+$BB mount -t ext4 -o rw "$CACHE_DEV" /mnt 2>>"$LOG"
+logx "S6 mount rc=$? 条目=$($BB ls /mnt 2>/dev/null | $BB wc -l)"
+[ -x /mnt/alpine/bin/busybox ] && [ -e /mnt/alpine/sbin/init ] || bail "rootfs 无效: $($BB ls /mnt 2>/dev/null | $BB tr '\n' ' ')"
+logx "S7 rootfs OK ver=$($BB cat /mnt/alpine/etc/alpine-release 2>/dev/null)"
+
+$BB cp "$LOG" /mnt/boot-initramfs.log 2>/dev/null
+# 把实际网卡名传给 Alpine 侧，boot-native.sh 不必再猜
+echo "$NEW" > /mnt/usbnet.name 2>/dev/null
+
+# ---------- 4. 切根 ----------
+$BB mount --bind /mnt/alpine "$NEWROOT" 2>>"$LOG" || bail "bind 失败"
+logx "S8 bind OK"
+$BB mkdir -p "$NEWROOT/dev" "$NEWROOT/proc" "$NEWROOT/sys"
+$BB mount --move /dev  "$NEWROOT/dev"  2>>"$LOG"
+$BB mount --move /proc "$NEWROOT/proc" 2>>"$LOG"
+$BB mount --move /sys  "$NEWROOT/sys"  2>>"$LOG"
+if [ -b "$NEWROOT/dev/splash" ]; then
+    $BB dd if="$LOG" of="$NEWROOT/dev/splash" bs=4096 conv=notrunc 2>/dev/null
+    $BB sync 2>/dev/null
+fi
+log "S10 switch_root"
+exec $BB switch_root "$NEWROOT" /sbin/init
+
+bail "switch_root 返回（不应发生）"
