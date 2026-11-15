@@ -25,7 +25,9 @@
 #
 #  6) udhcpc 拿地址 + 写 resolv.conf
 #
-# 用法: wifi-connect.sh [--iface wlan0] [--wait N]
+# 用法: wifi-connect.sh [--iface wlan0] [--wait N] [--hw-only]
+#   --hw-only  只做到"prima 加载 + 网卡 up"，不碰 wpa_supplicant 和 DHCP。
+#              wifi-tui.sh 用它在换网络前确保硬件就绪（换网络要自己管 wpa_supplicant）。
 set -u
 LOG=/var/log/wifi.log
 mkdir -p /var/log /run
@@ -34,10 +36,12 @@ say() { log "$*"; echo "$*"; }
 
 IFACE=wlan0
 WAIT=20
+HW_ONLY=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --iface) IFACE="$2"; shift 2 ;;
-        --wait)  WAIT="$2"; shift 2 ;;
+        --iface)   IFACE="$2"; shift 2 ;;
+        --wait)    WAIT="$2"; shift 2 ;;
+        --hw-only) HW_ONLY=1; shift ;;
         *) shift ;;
     esac
 done
@@ -117,6 +121,11 @@ fi
 # ---------- 网卡 up ----------
 ip link set "$IFACE" up 2>>"$LOG" || { say "!! $IFACE up 失败"; exit 1; }
 log "$IFACE 已 up"
+
+if [ "$HW_ONLY" = 1 ]; then
+    say "==== 硬件就绪: $IFACE（--hw-only，不做关联）===="
+    exit 0
+fi
 
 # ---------- 5) wpa_supplicant（wext）----------
 CONF=/etc/wpa_supplicant/wpa_supplicant.conf

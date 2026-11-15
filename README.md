@@ -63,6 +63,7 @@
 │   ├── boot-native.sh         openrc 之前执行：挂 /cache /data、校时、配网卡、起服务
 │   ├── inittab  sshd_config  udhcpd.conf  fstab  resolv.conf
 │   ├── wifi-connect.sh        WiFi 主流程：NV 就位 → 上电 → 等 cold boot → insmod → 关联 → DHCP
+│   ├── wifi-tui.sh            交互式 WiFi 配置器（dialog TUI）：扫描 / 连 / 存 / 删
 │   ├── wpa_supplicant.conf.example  WiFi 凭据模板（复制成 .conf 填自己的 SSID/密码，真实凭据不入库）
 │   ├── net-mode.sh            ics / tunnel 模式切换（WiFi 不可用时的兜底）
 │   ├── profile-proxy.sh       仅在隧道模式下导出 http_proxy
@@ -166,6 +167,18 @@ scripts/status.sh                   # 一页体检报告（含 WiFi 与联网实
 
 ### 7. 配 WiFi（可选，但很值得）
 
+SSH 进去，敲 `wifi-tui` 就有交互界面：
+
+```bash
+apk add dialog          # 只有这一个依赖
+wifi-tui                # 扫描 → 选网 → 输密码 → 连上 → 自动存
+```
+
+也可非交互：`wifi-tui scan` / `wifi-tui status` / `wifi-tui list` /
+`wifi-tui connect "SSID" "密码"`。
+
+想从电脑侧预置（换机器时省事）：
+
 ```bash
 cp device/wpa_supplicant.conf.example device/wpa_supplicant.conf
 vi device/wpa_supplicant.conf       # 填自己的 SSID / 密码
@@ -175,6 +188,10 @@ scripts/deploy-native.sh            # 推到设备
 
 开机时 `boot-native.sh` 会**后台**拉起 `wifi-connect.sh`（约 11 秒），
 不挡 sshd —— USB 那条路是保命线，必须最先可用。
+
+`wifi-tui` 有两个非显然但很重要的行为：**连失败会自动回滚配置**（并把原来的网络连回来），
+**连上后会校验 SSID**。前者防止一次密码输错就在无屏设备上留下"开机连不上但看起来正常"的
+坑；后者防止 wpa_supplicant 挑中别的已保存网络而被误报成功。
 
 ## WiFi：WCNSS + prima 是怎么打通的
 
@@ -257,6 +274,18 @@ if (max_retries >= 10) return -ENODEV;      /* "WCNSS driver not ready" */
    cache 分区根目录，Alpine 侧如果不重新挂载，写的不是同一个文件，安全网会静默失效。
 7. **没有 RTC 备电**，每次上电都是 1970。用 `/cache/.last_time` 存"上次已知时间"做残影恢复，
    精确时间由 `scripts/dev.sh` 每次连接时从电脑推过去。
+8. **CRLF 会让脚本报 "not found"**。Windows 上编辑出的脚本传到设备后 `#!/bin/sh\r`
+   让内核找不到解释器，错误信息极具误导性——文件明明在、权限也对，就是不执行。
+   `scripts/deploy-native.sh` 的 `put` 现在统一 `tr -d '\r'`，从传输环节根治。
+9. **busybox 的 `sed` 不认方括号里的 `\t`**（当成字面的字母 t），而 `awk` 认。
+   解析 `wpa_passphrase` 输出时用 `[ \t]` 会静默匹配失败、悄悄退到"存明文密码"，
+   表面看一切正常。解析空白一律用 `[[:space:]]`。
+10. **`iw` 把 SSID 里的非打印字节转义成字面文本 `\xNN`**（C locale 下中文也算）。
+    不解码的话中文 SSID 拿去连必然失败；隐藏 SSID 是整串 `\x00`，解码后为空，
+    正好据此跳过。用 `printf '%b'` 还原。
+11. **别在部署脚本里推 `resolv.conf`**。它由 DHCP / `wifi-connect.sh` 动态写，
+    推一次就把 DNS 打回隧道时代的 `127.0.0.1`（而 WiFi 模式下 unbound 是跳过的），
+    表现为 `apk` 报 "DNS: transient error"。
 
 ## 安全网
 
@@ -280,8 +309,11 @@ if (max_retries >= 10) return -ENODEV;      /* "WCNSS driver not ready" */
 - 仅用于**自己拥有**的设备。设备厂商已停止运营，本仓库不涉及任何绕过计费或破解服务的手段，
   只是把这台设备的硬件用起来跑自己的系统。
 - `device/` 里的 `sshd_config` 默认允许密码登录且示例密码是弱口令 `password`。
-  当前 `ListenAddress` 绑在 RNDIS 点对点地址上，局域网不可达，风险有限；**如果你要把它
-  桥接进局域网或做端口转发，请先改密码**。
+  `ListenAddress` 必须是 `0.0.0.0`（否则 WiFi 入口进不来），所以**一旦设备连上 WiFi，
+  22 端口就对整个局域网开放，而且凭据是 root/弱口令**。这是"能远程管理"和"安全"之间
+  必须自己权衡的地方：**请在第一次连 WiFi 前改掉密码**（设备上执行 `passwd`），
+  或改成仅密钥登录（`sshd_config` 里 `PasswordAuthentication no`）。
+  只在可信私有网络里用、且不在意的话，维持默认也能跑。
 - `vendor/`、`reference/` 下的固件片段与配置来自设备自身，版权归原厂；此处仅作
   个人设备恢复与研究用途。
 

@@ -11,7 +11,11 @@ export MSYS_NO_PATHCONV=1
 SSHO="-i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -o BatchMode=yes"
 
 put() { # put <本地文件> <远端路径> <权限>
-    if ssh $SSHO root@"$IP" "cat > '$2'" < "$1"; then
+    # 传输时统一剥掉 CR。
+    # 本仓库在 Windows 上编辑，编辑器/工具会间歇性写出 CRLF；脚本带上 CR 传到设备后
+    # `#!/bin/sh\r` 会让内核找不到解释器，报一个极具误导性的 "not found"（文件明明在、
+    # 权限也对）。在这里一次性挡掉，比每次手工 dos2unix 靠谱。
+    if tr -d '\r' < "$1" | ssh $SSHO root@"$IP" "cat > '$2'"; then
         ssh $SSHO root@"$IP" "chmod $3 '$2'" >/dev/null 2>&1
         echo "  ✓ $2  ($(wc -c < "$1") 字节, mode $3)"
     else
@@ -27,13 +31,18 @@ put "$SRC/net-mode.sh"         /usr/local/sbin/net-mode.sh    755
 put "$SRC/inittab"             /etc/inittab                   644
 put "$SRC/udhcpd.conf"         /etc/udhcpd.conf               644
 put "$SRC/sshd_config"         /etc/ssh/sshd_config           600
-put "$SRC/resolv.conf"         /etc/resolv.conf               644
+# 注意：故意不推 resolv.conf。
+# 它由 udhcpc（WiFi 连上后）和 wifi-connect.sh 动态写，内容随热点而变（网关地址）。
+# 早期推过，结果每次部署都把 DNS 打回隧道时代的 "nameserver 127.0.0.1"，
+# 而 WiFi 模式下 unbound 是被跳过的 —— 表现为 apk 报 "DNS: transient error"。
+# 需要手工修 DNS 时用 `wifi-tui.sh` 或直接改设备上的文件，别从这里推。
 put "$SRC/fstab"               /etc/fstab                     644
 put "$SRC/profile-proxy.sh"    /etc/profile.d/50-proxy.sh     644
 put "$SRC/unbound.conf"        /etc/unbound/unbound.conf      644
 put "$SRC/proxychains.conf"    /etc/proxychains/proxychains.conf 644
 put "$SRC/wifi-up.sh"          /wifi-up.sh                    755
 put "$SRC/wifi-connect.sh"     /usr/local/sbin/wifi-connect.sh 755
+put "$SRC/wifi-tui.sh"         /usr/local/sbin/wifi-tui.sh    755
 put "$SRC/wpa_supplicant.conf" /etc/wpa_supplicant/wpa_supplicant.conf 600
 put "$SRC/net-up.sh"           /usr/local/bin/net-up.sh       755
 put "$SRC/README-device.txt"   /root/README.txt               644
