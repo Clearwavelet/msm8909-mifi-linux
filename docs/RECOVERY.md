@@ -35,8 +35,9 @@ fastboot reboot
 ```
 > `fastboot flash cache` 写的就是 mmcblk0p23，即整个 Alpine 根，连带
 > `/cache/boot.count`、`/cache/.boot-android`、`/cache/.last_time`、root 密码一起回到备份时刻。
-> 当前最新是 `cache-20261116-0145`（**WiFi 已打通** / v14 已烧写 / 密码登录已开 / 固件去重）。
-> 这一份是最值钱的快照：恢复它就能直接回到"设备自己连 WiFi 上网"的状态。
+> 当前最新是 `cache-20261116-0201`（**WiFi 已打通 + wifi-tui 配置器可用** / v14 已烧写 /
+> 密码登录已开 / dialog 已装）。
+> 这一份是最值钱的快照：恢复它就能直接回到"设备自己连 WiFi 上网、SSH 进去敲 `wifi-tui` 换网"的状态。
 > `backup/old/` 里是更早的快照，只作历史参考，别用来恢复。
 
 进 fastboot 的办法：拔插后若 3 次进 Alpine 失败，initramfs 会自动回 Android；
