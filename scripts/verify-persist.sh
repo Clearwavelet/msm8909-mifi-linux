@@ -2,8 +2,7 @@
 # 冷启动复核：确认新加的 /data 挂载、时间残影、代理 profile 都在重启后自动生效
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-KEY="${DEV_KEY:-$HOME/.ssh/xj19_ed25519}"
-KEY="$(cygpath -w "$KEY" 2>/dev/null || echo "$KEY")"
+KEY="$(cygpath -w "$HERE/alpine/id_alpine" 2>/dev/null || echo "$HERE/alpine/id_alpine")"
 IP="${DEV_IP:-192.168.42.129}"
 export MSYS_NO_PATHCONV=1
 SSH="ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=6 -o BatchMode=yes"
@@ -48,6 +47,10 @@ for t in $(seq 1 20); do
         echo "udhcpd=$(pidof udhcpd 2>/dev/null)"
         echo "net=$(ls /sys/class/net | tr "\n" " ")"
         echo "proxyprofile=$([ -r /etc/profile.d/50-proxy.sh ] && echo yes || echo no)"
+        echo "wpa=$(pidof wpa_supplicant 2>/dev/null)"
+        echo "wlanip=$(ip -4 addr show wlan0 2>/dev/null | awk "/inet /{print \$2}")"
+        echo "defgw=$(ip route 2>/dev/null | awk "/^default/{print \$3; exit}")"
+        echo "wlanmod=$(lsmod 2>/dev/null | awk "/^wlan /{print \"loaded\"; exit}")"
         echo "lasttime=$(cat /cache/.last_time 2>/dev/null)"
         echo "apk=$(apk info 2>/dev/null | wc -l) 个包"
     ' 2>/dev/null)
@@ -66,3 +69,11 @@ echo "$out" | grep -q cache=OK && echo "  ✓ /cache 自动挂载" || echo "  �
 [ "${yr:-0}" -gt 2020 ] 2>/dev/null && echo "  ✓ 时间残影恢复生效 (year=$yr)" || echo "  ! 时间仍是 1970，残影未生效"
 echo "$out" | grep -q "^bootcount=0" && echo "  ✓ 启动计数已清零（安全网正常）" || echo "  ! boot.count 非 0"
 echo "$out" | grep -q proxyprofile=yes && echo "  ✓ 代理 profile 就位" || echo "  ✗ 代理 profile 缺失"
+
+# WiFi 是主联网路径，冷启动后应该自己连上（约 11 秒，所以前面等 kernel=3.10 那段
+# 通常已经把它等出来了；如果还没好，这里会显示"未连上"）
+wip=$(echo "$out" | sed -n 's/^wlanip=\(.*\)/\1/p')
+gw=$(echo "$out" | sed -n 's/^defgw=\(.*\)/\1/p')
+echo "$out" | grep -q "^wlanmod=loaded" && echo "  ✓ prima 驱动已加载" || echo "  ✗ prima 驱动未加载"
+[ -n "$wip" ] && echo "  ✓ wlan0 已拿到地址 $wip" || echo "  ! wlan0 未连上（看 /var/log/wifi.log）"
+[ -n "$gw" ] && echo "  ✓ 默认路由 $gw（WiFi 出网）" || echo "  ! 无默认路由，出不了网"

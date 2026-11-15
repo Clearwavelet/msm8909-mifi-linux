@@ -7,6 +7,10 @@ id_alpine_rsa
 *.ppk
 authorized_keys
 
+# ---- 真实 WiFi 凭据，永不入库（模板 .example 要入）----
+device/wpa_supplicant.conf
+!device/wpa_supplicant.conf.example
+
 # ---- 构建产物与备份 ----
 build/
 backup/
@@ -36,5 +40,6 @@ Thumbs.db
 
 # ---- 例外：编译好的镜像要入库 ----
 !images/boot-hybrid-v13.img
+!images/boot-hybrid-v14.img
 !vendor/stock-ramdisk.gz
 !vendor/busybox-static

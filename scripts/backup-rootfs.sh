@@ -7,8 +7,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$HERE/../backup}"
-KEY="${DEV_KEY:-$HOME/.ssh/xj19_ed25519}"
-KEY="$(cygpath -w "$KEY" 2>/dev/null || echo "$KEY")"
+KEY="$(cygpath -w "$HERE/alpine/id_alpine" 2>/dev/null || echo "$HERE/alpine/id_alpine")"
 IP="${DEV_IP:-192.168.42.129}"
 export MSYS_NO_PATHCONV=1
 SSHO=(-i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=10)

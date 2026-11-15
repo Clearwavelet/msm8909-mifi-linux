@@ -1,6 +1,11 @@
 Port 22
 AddressFamily inet
-ListenAddress 192.168.42.129
+# 同时接受两种地址下的连接：
+#   192.168.42.129  —— 隧道模式 / 兜底管理地址（一直保留）
+#   192.168.137.50  —— ICS 模式下的地址（PC 端 Windows 连接共享）
+# 不能写死单个地址：若那个地址当时还没配上，sshd 会直接 bind 失败退出，
+# 等于把自己锁在门外。监听 0.0.0.0 更稳（本机只有 lo 和 usb0 两个接口）。
+ListenAddress 0.0.0.0
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_rsa_key
 PermitRootLogin yes
@@ -11,4 +16,11 @@ KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 AuthorizedKeysFile .ssh/authorized_keys
 PrintMotd no
+
+# 允许客户端传入代理变量。
+# 原因：`ssh xj19 'curl ...'` 这种非交互命令不读 /etc/profile.d，
+# 拿不到 50-proxy.sh 导出的 http_proxy，于是明明隧道通了却上不了网。
+# 只放行这六个名字，不开放任意环境变量。
+AcceptEnv http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+
 Subsystem sftp /usr/lib/ssh/sftp-server

@@ -1,0 +1,33 @@
+# WCNSS(prima) 的 wpa_supplicant 配置模板
+#
+# 用法：
+#   cp device/wpa_supplicant.conf.example device/wpa_supplicant.conf
+#   改下面的 ssid / psk
+#   bash scripts/deploy-native.sh          # 推到设备 /etc/wpa_supplicant/wpa_supplicant.conf
+#   # 重启（拔插），或手动跑 /usr/local/sbin/wifi-connect.sh
+#
+# 重要：必须用 `wpa_supplicant -Dwext`（wifi-connect.sh 已写死）。
+# prima 的 nl80211 connect 实现不完整，nl80211 后端会报
+# "Association request to the driver failed"，只有 wext 能通。
+#
+# 多个 network={} 块会按 priority 依次尝试，漫游用得上。
+
+ctrl_interface=/var/run/wpa_supplicant
+ctrl_interface_group=0
+ap_scan=1
+
+network={
+	ssid="YOUR_SSID"
+	psk="YOUR_PASSWORD"
+	key_mgmt=WPA-PSK
+	scan_ssid=1
+	priority=10
+}
+
+# 开放网络（无密码）的写法：
+# network={
+# 	ssid="OPEN_SSID"
+# 	key_mgmt=NONE
+# 	scan_ssid=1
+# 	priority=1
+# }

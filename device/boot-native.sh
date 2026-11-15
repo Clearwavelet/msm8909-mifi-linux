@@ -109,6 +109,13 @@ log "选用网卡 NET=[$NET]"
 if [ -n "$NET" ] && [ -e "/sys/class/net/$NET" ]; then
     ifconfig "$NET" 192.168.42.129 netmask 255.255.255.0 up 2>>"$LOG"
     log "$NET: $(ifconfig "$NET" 2>&1 | tr '\n' ' ')"
+    # 同时挂上 ICS 网段的固定地址（这一条只配地址，不配路由）。
+    # 原因：Windows 一开启「Internet 连接共享」，就会把 RNDIS 侧改成
+    # 192.168.137.1，PC 上 192.168.42.0/24 的路由随之消失 —— 如果设备这边
+    # 还没配 137 网段地址，两边会互相看不见，改个共享就把自己锁在门外。
+    # 所以这里无条件先配上，让 sshd 在任何模式下都有入口。
+    ip addr add 192.168.137.50/24 dev "$NET" 2>>"$LOG"
+    log "$NET 地址: $(ip -4 addr show dev "$NET" 2>/dev/null | awk '/inet /{printf "%s ", $2}')"
     sed -i "s/^interface .*/interface $NET/" /etc/udhcpd.conf 2>/dev/null
 else
     log "!! 没有任何可用网卡"
@@ -123,6 +130,65 @@ spl
 
 hostname xj19 2>/dev/null
 echo xj19 > /etc/hostname 2>/dev/null
+
+# ---------------------------------------------------------------
+# WiFi（WCNSS / prima）—— 设备真正的联网方式，2026-11-16 打通
+#   整条链路是：NV 就位 -> echo 1 上电 -> 等 cold boot -> insmod -> 关联 -> DHCP
+#   耗时 10~20 秒，因此放后台，不能挡住 sshd（否则 USB 入口会晚起）。
+#   细节与踩过的坑都写在 /usr/local/sbin/wifi-connect.sh 里。
+# ---------------------------------------------------------------
+if [ -x /usr/local/sbin/wifi-connect.sh ]; then
+    ( setsid /usr/local/sbin/wifi-connect.sh >/var/log/wifi-boot.log 2>&1 </dev/null & )
+    log "wifi-connect 已后台启动（日志 /var/log/wifi.log）"
+else
+    log "wifi-connect.sh 未部署，跳过 WiFi"
+fi
+spl
+
+# ---------------------------------------------------------------
+# DNS 转发器（仅隧道时代的遗留，WiFi 通了以后不再需要）
+#   设备唯一对外通道曾是 PC 端的 SSH 反向隧道（只承载 TCP），而 musl 的
+#   resolver 只会发 UDP —— 当时必须由 unbound 把 UDP:53 翻成 TCP 转发到
+#   隧道的另一端（127.0.0.1:5353 -> PC 上 mihomo 的 DNS）。
+#   现在 WiFi 直连，resolv.conf 由 wifi-connect.sh 指向真实 DNS，
+#   unbound 若仍起来也只会占着 127.0.0.1:53，属无害遗留；这里直接跳过。
+# ---------------------------------------------------------------
+if [ -x /usr/local/sbin/wifi-connect.sh ]; then
+    pkill unbound 2>/dev/null
+    log "WiFi 接管联网，跳过 unbound 与隧道判定"
+elif [ -x /usr/sbin/unbound ]; then
+    pkill unbound 2>/dev/null
+    /usr/sbin/unbound -c /etc/unbound/unbound.conf 2>>"$LOG"
+    sleep 1
+    if [ -n "$(pidof unbound 2>/dev/null)" ]; then
+        log "unbound 已启动 pid=$(pidof unbound 2>/dev/null)（DNS 依赖 PC 隧道就位）"
+    else
+        log "!! unbound 启动失败（/etc/unbound/unbound.conf）"
+    fi
+else
+    log "unbound 未安装，跳过 DNS 转发器（域名将无法解析）"
+fi
+spl
+
+# ---------------------------------------------------------------
+# 出网方式：优先 ICS，退而求其次用 SSH 隧道
+#   ICS = Windows「Internet 连接共享」。PC 端把能上网的网卡共享给 RNDIS 后，
+#   设备就是 192.168.137.0/24 里的普通客户端，TCP/UDP/ICMP 全通。
+#   探测方式：连接 192.168.137.1:53（ICS 的 DNS 代理）。
+#   必须放在 sshd 之前 —— sshd 现在监听 0.0.0.0，与地址无关，但 DNS 要就位。
+# ---------------------------------------------------------------
+if [ -x /usr/local/sbin/wifi-connect.sh ]; then
+    # WiFi 是主路径，不再做 ICS/隧道判定（net-mode 会改 resolv.conf 和默认路由，
+    # 与 wifi-connect 抢同一个位置，容易互相覆盖）。手动要切模式仍可执行
+    # /usr/local/sbin/net-mode.sh ics|tunnel。
+    log "联网方式: WiFi（net-mode 自动判定已停用）"
+elif [ -x /usr/local/sbin/net-mode.sh ]; then
+    /usr/local/sbin/net-mode.sh auto 2>>"$LOG"
+    log "net-mode=$(cat /run/net-mode 2>/dev/null)（ics=Windows连接共享 / tunnel=SSH反向隧道）"
+else
+    log "!! net-mode.sh 未部署，保持 tunnel 模式"
+fi
+spl
 
 # sshd 的前置条件：私钥分离目录 + 严格权限（StrictModes 会检查）
 mkdir -p /run/sshd /var/empty

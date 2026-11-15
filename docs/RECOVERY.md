@@ -20,14 +20,14 @@
 ### 第 1 级：系统能启动，只是改坏了某个配置
 不需要恢复，直接改回来：
 ```bash
-scripts/dev.sh cmd 'vi /boot-native.sh'   # 或任何 /etc 下的文件
+dev/dev.sh cmd 'vi /boot-native.sh'   # 或任何 /etc 下的文件
 ```
-配置的"源头"都在 PC 的 `device/` 下，跑 `scripts/deploy-native.sh` 就能整体覆盖回去。
+配置的"源头"都在 PC 的 `dev/alpine/native/` 下，跑 `dev/deploy-native.sh` 就能整体覆盖回去。
 
 ### 第 2 级：根文件系统坏了（起不来，但 fastboot 可用）
 用裸镜像一条命令复活：
 ```bash
-cd tools
+cd dev/img
 LATEST=$(ls -t ../backup/cache-*.img.gz | head -1)   # 现役备份取最新的一份
 gunzip -c "$LATEST" > /tmp/cache.img
 fastboot flash cache /tmp/cache.img
@@ -35,7 +35,8 @@ fastboot reboot
 ```
 > `fastboot flash cache` 写的就是 mmcblk0p23，即整个 Alpine 根，连带
 > `/cache/boot.count`、`/cache/.boot-android`、`/cache/.last_time`、root 密码一起回到备份时刻。
-> 当前最新是 `cache-20261116-0020`（v13 已验证 / `UsePAM` 已修 / 固件去重 / 已开密码登录）。
+> 当前最新是 `cache-20261116-0145`（**WiFi 已打通** / v14 已烧写 / 密码登录已开 / 固件去重）。
+> 这一份是最值钱的快照：恢复它就能直接回到"设备自己连 WiFi 上网"的状态。
 > `backup/old/` 里是更早的快照，只作历史参考，别用来恢复。
 
 进 fastboot 的办法：拔插后若 3 次进 Alpine 失败，initramfs 会自动回 Android；
@@ -44,13 +45,13 @@ fastboot reboot
 ### 第 3 级：boot 分区也不对了（进 Android 也异常）
 先恢复原厂 boot，确认设备还活着：
 ```bash
-cd tools
+cd dev/img
 fastboot flash boot boot-backup.img     # 原厂，33554432 字节
 fastboot reboot
 ```
 md5 `4a88b02797f7dad80ae09db1767c0167`。确认 Android 正常后，再重做原生系统：
 ```bash
-fastboot flash boot boot-hybrid-v13.img  # 现役混合镜像：默认进 Alpine，标志存在则进 Android
+fastboot flash boot boot-hybrid-v14.img  # 现役混合镜像：默认进 Alpine，连续 3 次失败才进 Android
 fastboot flash cache <解压后的 cache 镜像>
 fastboot reboot
 ```
@@ -61,20 +62,21 @@ fastboot reboot
 
 | 文件 | 说明 |
 |---|---|
-| `boot-v13.img` | 现役混合镜像，13969408 字节 |
-| `boot-v12.img` | 上一版（MAC 随机），13967360 字节 |
+| `boot-v14.img` | **现役**混合镜像，13969408 字节（安全网改成连续 3 次失败才回 Android） |
+| `boot-v13.img` | 上一版，13969408 字节 |
+| `boot-v12.img` | 更早一版（MAC 随机），13967360 字节 |
 | `README-A.txt` | 中文操作说明 |
 
 在 Alpine 里回退 boot 分区（约 1 秒）：
 ```bash
-md5sum /data/recovery/boot-v13.img          # 先确认完整性
+md5sum /data/recovery/boot-v14.img          # 先确认完整性
 dd if=/data/recovery/boot-v12.img of=/dev/mmcblk0p20 bs=1M conv=fsync
 sync
 # 然后拔插
 ```
 在 Android 里回退（`adb root` 之后）：
 ```bash
-adb shell "dd if=/data/recovery/boot-v13.img of=/dev/block/bootdevice/by-name/boot"
+adb shell "dd if=/data/recovery/boot-v14.img of=/dev/block/bootdevice/by-name/boot"
 ```
 > 注意 boot 分区是 32 MB，镜像只有 13.9 MB，`dd` 写完镜像长度即可，不用管剩下部分。
 
@@ -85,18 +87,18 @@ mkfs.ext4 -L cache /dev/mmcblk0p23
 mount /dev/mmcblk0p23 /mnt
 tar -xzf rootfs-<日期>.tar.gz -C /mnt
 mkdir -p /mnt/{proc,sys,dev,run,mnt,home,tmp}
-scripts/deploy-native.sh      # 补回 /boot-native.sh、fstab、profile.d 等
+dev/deploy-native.sh      # 补回 /boot-native.sh、fstab、profile.d 等
 ```
 
 ## 换到第二根同型号的棒子
-1. `fastboot flash boot boot-hybrid-v13.img`
+1. `fastboot flash boot boot-hybrid-v14.img`
 2. 把备份的 cache 镜像 `fastboot flash cache`（或按上面 tar 流程重建）
 3. 注意：SSH 主机密钥会沿用旧设备的，authorized_keys 里是同一把 `id_alpine`，直接能连。
    若要区分，改 `/etc/hostname` 并重跑 `ssh-keygen -A`。
 
 ## 备份
 ```bash
-scripts/backup-rootfs.sh              # 生成 tar + 裸镜像 + md5，默认写到仓库根的 backup/（已 gitignore）
+dev/backup-rootfs.sh              # 生成 tar + 裸镜像 + md5，默认放 dev/../backup/
 ```
 
 ## WCNSS（板载 WiFi）现状 —— 已暂停

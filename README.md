@@ -9,8 +9,13 @@
 ```
 上电 → bootloader → 自建 initramfs → 挂 cache 分区 → 配 RNDIS 网卡
      → switch_root → Alpine（OpenRC）→ udhcpd + sshd
+                                     → wifi-connect（WCNSS/prima，后台 11 秒）
                                        ↑ 电脑这边 ssh root@192.168.42.129 即可
+                                       ↑ 或直接 ssh root@<WiFi 地址>，不插 USB 也行
 ```
+
+**板载 WiFi 已经跑起来了**（WCNSS + prima），设备自己连 AP、自己上网，
+`ping`/`apk`/`curl` 全通，不需要电脑、不需要代理隧道。这是本仓库最关键的一块。
 
 ## 成果
 
@@ -18,13 +23,14 @@
 |---|---|
 | 内核 | 原厂 3.10.49（未替换，`armv7l`） |
 | 用户空间 | Alpine Linux 3.24.4 / musl / OpenRC / busybox init |
-| 根文件系统 | `mmcblk0p23`（cache 分区，256 MB ext4，占用 30 MB） |
+| 根文件系统 | `mmcblk0p23`（cache 分区，256 MB ext4，占用 48 MB） |
 | 数据盘 | `mmcblk0p29`（原 Android userdata，1.79 GB）挂 `/data`，`/home` 绑过去 |
-| 内存占用 | 空载 28 MB / 383 MB |
-| 网络 | USB RNDIS，设备 `192.168.42.129`，自带 `udhcpd` 给电脑发地址 |
-| 登录 | SSH，密钥或密码；MAC 已固定，Windows 不会每次都新建网卡 |
-| 软件源 | `apk` 可用（27112 个包），经 SSH 反向隧道借用电脑代理 |
-| Android | 完整保留，可随时退回（连按 3 次启动失败自动退回） |
+| 内存占用 | 空载 36 MB / 383 MB |
+| **WiFi** | **WCNSS `/dev/wcnss_wlan` + prima `pronto_wlan.ko`，`wlan0` 自连 AP，TCP/UDP/ICMP 全通** |
+| USB 网络 | RNDIS，设备 `192.168.42.129`，自带 `udhcpd` 给电脑发地址 |
+| 登录 | SSH，密钥或密码；RNDIS MAC 已固定，Windows 不会每次都新建网卡 |
+| 软件源 | `apk` 可用（27112 个包），**WiFi 直连，不需要任何代理** |
+| Android | 完整保留，可随时退回（连续 3 次启动失败自动退回） |
 
 ## 硬件事实（实测，非猜测）
 
@@ -56,10 +62,13 @@
 ├── device/                    推到设备上的配置（改这里，再跑 scripts/deploy-native.sh）
 │   ├── boot-native.sh         openrc 之前执行：挂 /cache /data、校时、配网卡、起服务
 │   ├── inittab  sshd_config  udhcpd.conf  fstab  resolv.conf
-│   ├── profile-proxy.sh       检测到代理端口才导出 http_proxy
-│   └── wifi-probe.sh          板载 WiFi 试验脚本（分步、可中断，默认不自启）
+│   ├── wifi-connect.sh        WiFi 主流程：NV 就位 → 上电 → 等 cold boot → insmod → 关联 → DHCP
+│   ├── wpa_supplicant.conf.example  WiFi 凭据模板（复制成 .conf 填自己的 SSID/密码，真实凭据不入库）
+│   ├── net-mode.sh            ics / tunnel 模式切换（WiFi 不可用时的兜底）
+│   ├── profile-proxy.sh       仅在隧道模式下导出 http_proxy
+│   └── wifi-probe.sh          WiFi 分步排障脚本（手动执行）
 ├── initramfs/
-│   ├── hybrid/init            现役：默认进 Alpine，失败退回 Android
+│   ├── hybrid/init            现役：默认进 Alpine，连续 3 次失败才退回 Android
 │   ├── native/init            早期纯原生版（无退回分支）
 │   └── mini/init              15 行诊断版（排查"零日志冻死"时用的）
 ├── tools/
@@ -71,13 +80,14 @@
 │   ├── verify-boot.sh         冷启动后逐项判定是否真的进了 Alpine
 │   └── wait-alpine.sh         上电后判定：RNDIS 出现=Alpine，adb 回来=退回成功
 ├── scripts/                   电脑侧日常运维
-│   ├── dev.sh                 一条命令 = 反向代理隧道 + 校时 + shell
+│   ├── dev.sh                 一条命令 = 校时 + shell（`up` 子命令开隧道兜底）
 │   ├── deploy-native.sh       幂等推送 device/ 下的配置
-│   ├── status.sh              一页体检报告
+│   ├── status.sh              一页体检报告（含 WiFi 与联网实测）
 │   ├── backup-rootfs.sh       双份备份（tar + cache 分区裸镜像）
 │   └── verify-persist.sh      冷启动后核对挂载/时间/计数/代理
 ├── images/
-│   └── boot-hybrid-v13.img    编译好的现役镜像，13.9 MB，可直接刷
+│   ├── boot-hybrid-v14.img    现役镜像，13.9 MB，可直接刷
+│   └── boot-hybrid-v13.img    上一版，回退用
 ├── vendor/
 │   ├── busybox-static         armv7 静态 busybox，initramfs 里的解释器
 │   └── stock-ramdisk.gz       原厂 ramdisk，提供 /init.real 等需保留的条目
@@ -148,11 +158,85 @@ fastboot flash cache rootfs.img        # 或 dd 到 /dev/mmcblk0p23
 ### 6. 连上去
 
 ```bash
-scripts/dev.sh                      # 隧道 + 校时 + shell
-scripts/status.sh                   # 一页体检报告
+scripts/dev.sh                      # 校时 + shell
+scripts/status.sh                   # 一页体检报告（含 WiFi 与联网实测）
 ```
 
 图形客户端见 `docs/SSH-CLIENT.md`（MobaXterm 用密码 `password` 即可）。
+
+### 7. 配 WiFi（可选，但很值得）
+
+```bash
+cp device/wpa_supplicant.conf.example device/wpa_supplicant.conf
+vi device/wpa_supplicant.conf       # 填自己的 SSID / 密码
+scripts/deploy-native.sh            # 推到设备
+# 重启（拔插），或手动：ssh xj19 '/usr/local/sbin/wifi-connect.sh'
+```
+
+开机时 `boot-native.sh` 会**后台**拉起 `wifi-connect.sh`（约 11 秒），
+不挡 sshd —— USB 那条路是保命线，必须最先可用。
+
+## WiFi：WCNSS + prima 是怎么打通的
+
+这块的公开资料很少，绝大多数结论是"必须复刻 Android 的 `wcnss_service`，musl 跑不了"。
+**这个结论是错的**，`wcnss_service` 其实不喂任何数据——NV 标定由内核自己
+`request_firmware("wlan/prima/WCNSS_qcom_wlan_nv.bin")` 下载。
+
+真正的三个卡点全是环境准备问题：
+
+| 症状 | 真实原因 | 修法 |
+|---|---|---|
+| `echo 1 > /dev/wcnss_wlan` 后芯片"通电"但固件没加载 | **`/firmware`（p1）没挂载**，PIL 找不到 `wcnss.mdt` | `mount -t vfat -o ro /dev/mmcblk0p1 /firmware` |
+| `insmod` 报 `WCNSS driver not ready`，接着内核调度停摆 | `request_firmware` 在所有路径都没找到 NV，退到用户态 hotplug helper，3.10 上**不可中断等 60 秒并占住 workqueue** | 把 NV + cfg.ini 复制到 `/lib/firmware/wlan/prima/`（内核默认搜索路径，且在可写根分区上） |
+| `Association request to the driver failed` | prima 只实现了 nl80211 的一个子集 | `wpa_supplicant -Dwext`（不是 nl80211） |
+
+正确顺序（`device/wifi-connect.sh` 已固化）：
+
+```sh
+mount -t vfat -o ro /dev/mmcblk0p1 /firmware        # 给 PIL 取 wcnss.mdt + b00~b12
+mkdir -p /lib/firmware/wlan/prima                    # 给内核 request_firmware 取 NV
+cp /etc/firmware/wlan/prima/* /lib/firmware/wlan/prima/
+echo 1 > /dev/wcnss_wlan 2>/dev/null                 # 上电（写 1 字节返回 EFAULT 属预期）
+while ! dmesg | grep -q WCNSS_CBC_COMPLETE_IND; do sleep 1; done   # ← 这道门槛不能跳
+insmod /root/wlan/pronto_wlan.ko
+echo sta > /sys/module/wlan/parameters/fwpath
+wpa_supplicant -Dwext -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf
+udhcpc -i wlan0 -n -q
+```
+
+**为什么"等 cold boot"这道门槛不能跳**：prima 的 `hdd_driver_init` 里有
+
+```c
+while (!wcnss_device_ready() && 10 >= ++max_retries) msleep(1000);
+if (max_retries >= 10) return -ENODEV;      /* "WCNSS driver not ready" */
+```
+
+而 `wcnss_device_ready()` 只看 `nv_downloaded && !shutdown`。NV 没下完就 `insmod`，
+会先白等 5 秒再失败，并且那次失败会把内核 workqueue 一起拖死。
+
+素材位置（本机实测）：
+
+- 固件 `wcnss.mdt` + `wcnss.b00~b12`：`mmcblk0p1` 的 `image/`
+- 射频校准 `WCNSS_qcom_wlan_nv.bin`（31723 B）+ `WCNSS_qcom_cfg.ini`：persist 分区（p22）/ system 分区（p21）
+- 驱动 `pronto_wlan.ko`：system 分区 `lib/modules/pronto/`，vermagic 与运行内核完全一致
+- 内核配置正好对上：`CONFIG_CFG80211=y`、`WEXT_CORE=y`，`MAC80211` 关闭（prima 本来就不走 mac80211）
+
+冷启动实测日志：
+
+```
+[00:45:42] NV 就位: 31723 字节
+[00:45:42] 已触发 WCNSS 上电
+[00:45:49] cold boot 完成（6s）
+[00:45:49] insmod rc=0
+[00:45:52] 已关联: bssid=d4:a1:48:9d:70:e0
+[00:45:53] udhcpc rc=0 addr=192.168.3.108/24
+[00:45:53] ==== WiFi 就绪: wlan0 192.168.3.108/24 gw=192.168.3.1 ====
+```
+
+已知小毛病：`wlan0` 的 MAC 是 cfg.ini 里的占位值 `00:0a:f5:89:89:ff`
+（dmesg 有 `Failed to generate wlan interface mac addr`）。WPA2-PSK 不受影响，
+只有 MAC 绑定的网络才需要处理。另外 `iw dev wlan0 link` 显示未连接是 nl80211 状态回报不全，
+判状态要看 `wpa_cli status` 或 `iwconfig`。
 
 ## 几个值得记录的坑
 
@@ -183,15 +267,13 @@ scripts/status.sh                   # 一页体检报告
 
 ## 已知限制
 
-- **没有默认路由**：设备只能访问电脑，外网要经 SSH 反向隧道借电脑的代理
-- **板载 WiFi（WCNSS）未打通**：芯片能被唤醒（`echo 1 > /dev/wcnss_wlan` 后状态
-  `OFFLINE`→`ONLINE`、固件确实加载出复位），但 `prima` 驱动等的是原厂 `wcnss_service`
-  通过 `/dev/wcnss_ctrl` 喂 NV 数据后的 ready 通知，而它是 bionic 动态链接、musl 上跑不了；
-  强行 `insmod` 会把内核调度搞停（不是 panic，没有看门狗，只能拔插）。**默认没有任何自启动
-  会加载该模块**
+- **WiFi 模式下网络是全通的**（TCP/UDP/ICMP/QUIC 都行）。只有在 WiFi 连不上、退回到
+  SSH 反向隧道兜底时，才有"UDP 不通、`ping` 不通、必须电脑在线"那些限制
+- 设备**没有 RTC 备电**，上电时间是 1970，靠 `/cache/.last_time` 残影 + 电脑校时纠正
 - 内核无 `CONFIG_WATCHDOG` / pstore，挂死时没有任何日志可看
 - `/hp`、`/hs`、`/mnt` 是 `switch_root` 留下的僵尸挂载，`df` 里根分区会显示成
   `/nd/cache on /mnt`——纯显示问题，实际就是 `mmcblk0p23`
+- `wlan0` 的 MAC 是 cfg.ini 里的占位值 `00:0a:f5:89:89:ff`，WPA2-PSK 不受影响
 
 ## 声明
 

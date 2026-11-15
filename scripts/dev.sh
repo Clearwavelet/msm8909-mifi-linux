@@ -10,8 +10,7 @@
 #   ./dev.sh up           只开隧道，不收 shell（后台常驻，Ctrl-C 断开）
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-KEY="${DEV_KEY:-$HOME/.ssh/xj19_ed25519}"
-KEY="$(cygpath -w "$KEY" 2>/dev/null || echo "$KEY")"
+KEY="$(cygpath -w "$HERE/alpine/id_alpine" 2>/dev/null || echo "$HERE/alpine/id_alpine")"
 IP="${DEV_IP:-192.168.42.129}"
 export MSYS_NO_PATHCONV=1
 
@@ -28,9 +27,29 @@ if [ -z "$PORT" ]; then
     echo "   隧道跳过，但 SSH 仍可用；设备内需要联网时请先启动代理。"
     TUN=()
 else
-    echo "代理: PC 127.0.0.1:$PORT -> 设备 127.0.0.1:7897"
     TUN=(-R "127.0.0.1:7897:127.0.0.1:$PORT")
+    echo "代理: PC 127.0.0.1:$PORT -> 设备 127.0.0.1:7897"
+    # DNS 也一起递进去：设备上的 unbound 会把 UDP:53 翻成 TCP 转发到 5353，
+    # 而 5353 在这里被映射到 PC 上 mihomo 的 DNS(53)。没有这一条设备就解析不了域名。
+    if (exec 3<>/dev/tcp/127.0.0.1/53) 2>/dev/null; then
+        exec 3<&- 3>&-
+        TUN+=(-R "127.0.0.1:5353:127.0.0.1:53")
+        echo "DNS : PC 127.0.0.1:53   -> 设备 127.0.0.1:5353"
+    else
+        echo "!! PC 上没有 DNS 在 53 监听（mihomo 的 dns 未开启？），域名将无法解析"
+    fi
+
+    # 如果设备上已经有别的会话开好了隧道（例如另开终端跑着 ./dev.sh up），
+    # 就不要再 -R 一遍，否则会因端口占用报 "remote port forwarding failed"。
+    if ssh "${SSHO[@]}" -o BatchMode=yes root@"$IP" \
+         'grep -qi 0100007F:1ED9 /proc/net/tcp' 2>/dev/null; then
+        echo "复用: 设备上已有隧道在监听 7897，本次不再重复转发"
+        TUN=()
+    fi
 fi
+
+# 设备侧把 DNS 转发器拉起来（仅当它没在跑；强制重启用 ./dev.sh net）
+BOOTNET='if ! pidof unbound >/dev/null 2>&1 && [ -x /usr/local/bin/net-up.sh ]; then /usr/local/bin/net-up.sh >/dev/null 2>&1; fi'
 
 # --- 校时 ---
 sync_time() {
@@ -45,7 +64,13 @@ case "${1:-shell}" in
     up)
         sync_time
         echo "隧道已开（前台）。Ctrl-C 结束。"
+        echo "首次使用或改了配置后，另开一个终端跑: ./dev.sh net"
         exec ssh "${SSHO[@]}" -N "${TUN[@]}" root@"$IP"
+        ;;
+    net)
+        # 完整自检：起 DNS、实测解析与出网，打印用法
+        sync_time
+        exec ssh "${SSHO[@]}" "${TUN[@]}" root@"$IP" "/usr/local/bin/net-up.sh"
         ;;
     cmd)
         shift
@@ -53,7 +78,9 @@ case "${1:-shell}" in
         # 非交互 ssh 不读 /etc/profile.d，代理要在这里显式带上
         if [ -n "$PORT" ]; then
             exec ssh "${SSHO[@]}" "${TUN[@]}" root@"$IP" \
-                "export http_proxy=http://127.0.0.1:7897 https_proxy=http://127.0.0.1:7897 HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897; $*"
+                "$BOOTNET
+export http_proxy=http://127.0.0.1:7897 https_proxy=http://127.0.0.1:7897 HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 all_proxy=socks5h://127.0.0.1:7897
+$*"
         else
             exec ssh "${SSHO[@]}" root@"$IP" "$*"
         fi
@@ -61,6 +88,6 @@ case "${1:-shell}" in
     *)
         sync_time
         echo "进入设备（exit 或 Ctrl-D 退出）"
-        exec ssh "${SSHO[@]}" -t "${TUN[@]}" root@"$IP"
+        exec ssh "${SSHO[@]}" -t "${TUN[@]}" root@"$IP" "$BOOTNET; exec /bin/sh -l"
         ;;
 esac
